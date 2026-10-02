@@ -15,3 +15,10 @@ Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agent
 ### Package boundaries
 
 Package boundaries are machine-checked: read `mathutrice/README.md` before adding a package, or importing across one.
+
+### Lab 1 brief
+
+Constraints for Lab 1 (package-boundary fixes via the Architecture Check,
+and facts-only answers for the `POST /session/evaluation` sizing question).
+One commit per fix, never silence a violation, stop at any choice of
+interface or design. See `docs/agents/lab1-brief.md`.
