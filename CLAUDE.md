@@ -22,3 +22,12 @@ Constraints for Lab 1 (package-boundary fixes via the Architecture Check,
 and facts-only answers for the `POST /session/evaluation` sizing question).
 One commit per fix, never silence a violation, stop at any choice of
 interface or design. See `docs/agents/lab1-brief.md`.
+
+### Lab 2 brief
+
+Constraints for Lab 2 (Clean Bench and CI fallback branches, a required
+Architecture Check workflow, a Spec built from the Student's Design
+Document via `/to-spec`, and a TDD module built via `/tdd`). Work in the
+Student's fork only, one commit per change, never merge a pull request or
+touch the fork's ruleset, stop at any choice the Spec doesn't name. See
+`docs/agents/lab2-brief.md`.
