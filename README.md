@@ -116,6 +116,28 @@ The first call answers `303` with a `Set-Cookie: session=…`. `role` is
 user's name, or one derived from the address. Add `-d 'key=…'` when
 `DEV_LOGIN_KEY` is set.
 
+## Deploying on Azure App Service
+
+`.github/workflows/architecture.yml` deploys this fork to **staging**, an App Service
+app on one B1 Linux plan in Spain Central, always on.
+
+- **On green.** A push to `course-2026-fallback-clean-bench` whose `architecture` and
+  `test` jobs both pass is built into one image, tagged with its commit and pushed to
+  GHCR (`ghcr.io/emilez10/mathutrice:<commit>`), then deployed to staging. A pull request
+  or a red run never deploys. The deploy ends once `/dev/login` answers `200`, and fails
+  if it does not within ten minutes.
+- **One process.** The image starts `uvicorn mathutrice.app:app`, and nothing else. The
+  scheduler that cleans up old conversations runs inside it.
+- **Settings.** Each environment's settings and secrets live in the GitHub Environment of
+  the same name, never in a committed file. The variables are `AZURE_CLIENT_ID`,
+  `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP` and
+  `AZURE_WEBAPP_NAME`. The secrets are `DEV_LOGIN_KEY`, `SESSION_SECRET` and
+  `LLM_API_KEY`. Every deploy writes them to the app, with `AUTH_MODE=dev`. The workflow
+  logs in to Azure through OpenID Connect, as its GitHub Environment: no Azure password
+  is stored anywhere.
+- **The package must be Public** on GitHub (Package settings), so that Azure can pull
+  the image without a password.
+
 ## Layout
 
 ```
