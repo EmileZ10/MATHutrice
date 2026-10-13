@@ -45,3 +45,112 @@ jobs:
 
       - name: Run the test suite (pytest)
         run: uv run pytest
+
+  # Deploy on green: only a push to the default branch, and only once the two
+  # checks above have passed. Never a pull request, never a red run.
+  deploy-staging:
+    name: deploy to staging
+    needs: [architecture, test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/course-2026-fallback-clean-bench'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    # One deploy at a time, in the order pushed.
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false
+    environment:
+      name: staging
+      url: https://${{ vars.AZURE_WEBAPP_NAME }}.azurewebsites.net
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      # One image per commit, tagged with it: whatever runs can be traced to the
+      # run that passed. A commit pushed twice is built once.
+      - name: Build and push the image, unless it exists
+        id: image
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:$GITHUB_SHA"
+          echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          if docker manifest inspect "$image" > /dev/null 2>&1; then
+            echo "$image already built"
+          else
+            docker build \
+              --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+              -t "$image" .
+            docker push "$image"
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      # No Azure password: GitHub proves to Azure which repository and which
+      # Environment it runs in, and Azure lets github-deploy in.
+      - name: Log in to Azure
+        uses: azure/login@v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Written at every deploy, so the GitHub Environment stays the one place a
+      # setting changes. --output none: the command would print every value back.
+      - name: Write this environment's settings
+        env:
+          RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          APP_NAME: ${{ vars.AZURE_WEBAPP_NAME }}
+          DEV_LOGIN_KEY: ${{ secrets.DEV_LOGIN_KEY }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: |
+          az webapp config appsettings set \
+            --resource-group "$RESOURCE_GROUP" --name "$APP_NAME" --output none \
+            --settings \
+              WEBSITES_PORT=8000 \
+              WEBSITES_ENABLE_APP_SERVICE_STORAGE=false \
+              AUTH_MODE=dev \
+              DATABASE_URL=sqlite:///./mathutrice.db \
+              LLM_BASE_URL=https://api.mistral.ai/v1 \
+              LLM_MODEL=ministral-14b-latest \
+              "DEV_LOGIN_KEY=$DEV_LOGIN_KEY" \
+              "SESSION_SECRET=$SESSION_SECRET" \
+              "LLM_API_KEY=$LLM_API_KEY"
+
+      # The image is public on GHCR: the app pulls it without credentials.
+      - name: Run the image on staging
+        env:
+          RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          APP_NAME: ${{ vars.AZURE_WEBAPP_NAME }}
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: |
+          az webapp config container set \
+            --resource-group "$RESOURCE_GROUP" --name "$APP_NAME" --output none \
+            --container-image-name "$IMAGE"
+          echo "$APP_NAME now runs $IMAGE"
+
+      # The placeholder image has no /dev/login, so a 200 there means this app
+      # started. A container that never starts fails the run.
+      - name: Wait until the app answers
+        env:
+          APP_NAME: ${{ vars.AZURE_WEBAPP_NAME }}
+        run: |
+          url="https://$APP_NAME.azurewebsites.net/dev/login"
+          limit=600
+          start=$(date +%s)
+          while true; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$url" || true)
+            elapsed=$(( $(date +%s) - start ))
+            if [ "$code" = "200" ]; then
+              echo "$url answers 200, ${elapsed} s after the image was set"
+              exit 0
+            fi
+            echo "${elapsed} s: $url answered ${code:-nothing}"
+            if [ "$elapsed" -ge "$limit" ]; then
+              echo "$url did not answer 200 within $limit s" >&2
+              exit 1
+            fi
+            sleep 15
+          done
