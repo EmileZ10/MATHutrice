@@ -1,0 +1,15 @@
+# Never let a local secret or a local environment enter an image.
+.env
+.venv
+.git
+.github
+.claude
+
+# Not needed to run the application.
+tests
+docs
+scripts
+__pycache__
+*.pyc
+.pytest_cache
+*.db
