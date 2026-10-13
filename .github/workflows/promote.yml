@@ -1,0 +1,129 @@
+# The Promotion: started by hand, never by a push or a schedule. It deploys to
+# production the image of staging's last green deploy, and builds nothing, so
+# production only ever receives an image that already ran on staging.
+#
+#     gh workflow run promote.yml --ref course-2026-fallback-clean-bench
+name: Promote to production
+
+on:
+  workflow_dispatch:
+
+jobs:
+  # First half: find that image. It reads the runs of the deploy workflow, not
+  # the staging app: after a failed deploy, staging may still be set to an image
+  # that never answered, and that one must not be promoted.
+  last-green-staging:
+    name: find staging's last green deploy
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      image: ${{ steps.find.outputs.image }}
+    steps:
+      # Push runs of the default branch, newest first. The first whose
+      # `deploy to staging` job passed built and deployed the image tagged with
+      # its commit. Each run passed over is logged, with the reason. Only the
+      # newest 100 are read. `deploy to staging` is the name of the job in
+      # architecture.yml: renaming it there means renaming it here.
+      - name: Find the newest run whose deploy to staging passed
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DEPLOY_BRANCH: course-2026-fallback-clean-bench
+        run: |
+          runs=$(gh run list --workflow architecture.yml --branch "$DEPLOY_BRANCH" --event push --limit 100 \
+            --json databaseId,headSha --jq '.[] | "\(.databaseId) \(.headSha)"')
+          while read -r run sha; do
+            [ -n "$run" ] || continue
+            deploy=$(gh run view "$run" --json jobs --jq '.jobs[] | select(.name == "deploy to staging") | .conclusion')
+            if [ "$deploy" = success ]; then
+              image="ghcr.io/${GITHUB_REPOSITORY,,}:$sha"
+              echo "Run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run, commit $sha: deploy to staging passed"
+              echo "Promoting $image"
+              echo "image=$image" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Run $run, commit $sha: deploy to staging ${deploy:-has no result}, skipped"
+          done <<< "$runs"
+          echo "No push run on $DEPLOY_BRANCH has a deploy to staging that passed: nothing to promote" >&2
+          exit 1
+
+  # Second half: that same image, on production, with production's own settings
+  # and secrets from the GitHub Environment of the same name.
+  promote-production:
+    name: promote to production
+    needs: last-green-staging
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    environment:
+      name: production
+      url: https://${{ vars.AZURE_WEBAPP_NAME }}.azurewebsites.net
+    steps:
+      - name: Log in to Azure
+        uses: azure/login@v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # The same settings as the staging deploy writes, with production's own
+      # secrets. If one changes in architecture.yml, change it here too.
+      - name: Write this environment's settings
+        env:
+          RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          APP_NAME: ${{ vars.AZURE_WEBAPP_NAME }}
+          DEV_LOGIN_KEY: ${{ secrets.DEV_LOGIN_KEY }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: |
+          az webapp config appsettings set \
+            --resource-group "$RESOURCE_GROUP" --name "$APP_NAME" --output none \
+            --settings \
+              WEBSITES_PORT=8000 \
+              WEBSITES_ENABLE_APP_SERVICE_STORAGE=false \
+              AUTH_MODE=dev \
+              DATABASE_URL=sqlite:///./mathutrice.db \
+              LLM_BASE_URL=https://api.mistral.ai/v1 \
+              LLM_MODEL=ministral-14b-latest \
+              "DEV_LOGIN_KEY=$DEV_LOGIN_KEY" \
+              "SESSION_SECRET=$SESSION_SECRET" \
+              "LLM_API_KEY=$LLM_API_KEY"
+
+      - name: Run that image on production
+        env:
+          RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          APP_NAME: ${{ vars.AZURE_WEBAPP_NAME }}
+          IMAGE: ${{ needs.last-green-staging.outputs.image }}
+        run: |
+          az webapp config container set \
+            --resource-group "$RESOURCE_GROUP" --name "$APP_NAME" --output none \
+            --container-image-name "$IMAGE"
+          echo "$APP_NAME now runs $IMAGE"
+
+      - name: Wait until the app answers
+        env:
+          APP_NAME: ${{ vars.AZURE_WEBAPP_NAME }}
+        run: |
+          url="https://$APP_NAME.azurewebsites.net/dev/login"
+          limit=600
+          start=$(date +%s)
+          while true; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$url" || true)
+            elapsed=$(( $(date +%s) - start ))
+            if [ "$code" = "200" ]; then
+              echo "$url answers 200, ${elapsed} s after the image was set"
+              exit 0
+            fi
+            echo "${elapsed} s: $url answered ${code:-nothing}"
+            if [ "$elapsed" -ge "$limit" ]; then
+              echo "$url did not answer 200 within $limit s" >&2
+              exit 1
+            fi
+            sleep 15
+          done

@@ -137,6 +137,15 @@ app on one B1 Linux plan in Spain Central, always on.
   is stored anywhere.
 - **The package must be Public** on GitHub (Package settings), so that Azure can pull
   the image without a password.
+- **Production, by promotion only.** `.github/workflows/promote.yml` is started by hand:
+  it reads the push runs of the default branch, newest first, logs each one it skips, and
+  deploys to production the image of the first whose `deploy to staging` job passed. It
+  builds nothing, so production only ever receives an image that already ran on staging.
+  With no such run, it deploys nothing.
+
+  ```bash
+  gh workflow run promote.yml --ref course-2026-fallback-clean-bench
+  ```
 
 ## Layout
 
